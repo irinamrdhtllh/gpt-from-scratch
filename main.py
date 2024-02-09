@@ -1,10 +1,15 @@
+import numpy as np
 import torch
+import torch.nn as nn
+from torch.nn import functional as F
+
+
+# Hyperparameters
+BATCH_SIZE = 32  # Number of independent sequences will be processed in parallel
+BLOCK_SIZE = 8  # Max context length for predictions
+
 
 torch.manual_seed(1337)
-
-
-BATCH_SIZE = 4  # Number of independent sequences will be processed in parallel
-BLOCK_SIZE = 8  # Max context length for predictions
 
 
 def load_data(mode="train"):
@@ -21,6 +26,47 @@ def load_data(mode="train"):
     y = torch.stack([data[i + 1 : i + BLOCK_SIZE + 1] for i in ids])
 
     return x, y
+
+
+class BigramLanguageModel(nn.Module):
+    """The simplest model in NLP"""
+
+    def __init__(self, vocab_size):
+        super().__init__()
+        # Each token directly reads off the logits for the next token from a lookup table
+        self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+
+    def forward(self, contexts, targets=None):
+        logits = self.token_embedding_table(contexts)  # (n_batch, n_block, n_vocab)
+
+        if targets is not None:
+            # Reshape the logits and targets
+            logits = logits.reshape(-1, 65)  # (n_batch * n_block, n_vocab)
+            targets = targets.reshape(-1)  # (n_batch * n_block)
+            # Calculate the loss
+            loss = F.cross_entropy(logits, targets)
+
+            return logits, loss
+
+        return logits
+
+    def generate(self, contexts, max_new_tokens):
+        for _ in range(max_new_tokens):
+            # Get the predictions
+            logits = self.forward(contexts)
+            logits = logits[:, -1, :]  # (n_batch, n_vocab)
+
+            # Get the probabilities
+            probs = F.softmax(logits, dim=-1)
+
+            # Sample from the distribution
+            next_contexts = torch.multinomial(probs, num_samples=1)  # (n_batch, 1)
+
+            # Append sampled context to the running sequence
+            # fmt: off
+            contexts = torch.cat((contexts, next_contexts), dim=1) # (n_batch, n_block + 1)
+            # fmt: on
+        return contexts
 
 
 if __name__ == "__main__":
@@ -48,10 +94,22 @@ if __name__ == "__main__":
     train_data = data[:n]
     val_data = data[n:]
 
-    x, y = load_data(mode="train")
+    model = BigramLanguageModel(vocab_size=vocab_size)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    for steps in range(10000):
+        x, y = load_data(mode="train")
+        # Evaluate the loss
+        logits, loss = model.forward(x, y)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
 
-    for batch in range(BATCH_SIZE):
-        for block in range(BLOCK_SIZE):
-            context = x[batch, : block + 1]
-            target = y[batch, block]
-            print(f"when the input is {context}, the target is {target}")
+    print(loss.item())
+
+    print(
+        decode(
+            model.generate(
+                contexts=torch.zeros((1, 1), dtype=torch.long), max_new_tokens=400
+            )[0].tolist()
+        )
+    )
