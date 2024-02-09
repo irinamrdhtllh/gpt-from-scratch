@@ -7,6 +7,11 @@ from torch.nn import functional as F
 # Hyperparameters
 BATCH_SIZE = 32  # Number of independent sequences will be processed in parallel
 BLOCK_SIZE = 8  # Max context length for predictions
+MAX_ITERS = 10000
+EVAL_INTERVAL = 1000
+EVAL_ITERS = 200
+LEARNING_RATE = 1e-2
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 torch.manual_seed(1337)
@@ -24,8 +29,26 @@ def load_data(mode="train"):
     )  # id of the first character of x
     x = torch.stack([data[i : i + BLOCK_SIZE] for i in ids])
     y = torch.stack([data[i + 1 : i + BLOCK_SIZE + 1] for i in ids])
+    x, y = x.to(device=DEVICE), y.to(device=DEVICE)
 
     return x, y
+
+
+@torch.no_grad()
+def estimate_loss():
+    output = {}
+    model.eval()
+
+    for mode in ["train", "val"]:
+        losses = torch.zeros(EVAL_ITERS)
+        for i in range(EVAL_ITERS):
+            x, y = load_data(mode)
+            logits, loss = model.forward(x, y)
+            losses[i] = loss.item()
+        output[mode] = losses.mean()
+    model.train()
+
+    return output
 
 
 class BigramLanguageModel(nn.Module):
@@ -94,22 +117,30 @@ if __name__ == "__main__":
     train_data = data[:n]
     val_data = data[n:]
 
-    model = BigramLanguageModel(vocab_size=vocab_size)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    for steps in range(10000):
+    model = BigramLanguageModel(vocab_size=vocab_size).to(device=DEVICE)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+
+    for iter in range(MAX_ITERS + 1):
+        if iter % EVAL_INTERVAL == 0:
+            losses = estimate_loss()
+            print(
+                f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
+            )
+
+        # Sample a batch of data
         x, y = load_data(mode="train")
+
         # Evaluate the loss
         logits, loss = model.forward(x, y)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
 
-    print(loss.item())
-
     print(
         decode(
             model.generate(
-                contexts=torch.zeros((1, 1), dtype=torch.long), max_new_tokens=400
+                contexts=torch.zeros((1, 1), dtype=torch.long, device=DEVICE),
+                max_new_tokens=500,
             )[0].tolist()
         )
     )
