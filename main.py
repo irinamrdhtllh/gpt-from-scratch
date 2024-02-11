@@ -5,13 +5,16 @@ from models import BigramLanguageModel
 
 
 # Hyperparameters
-BATCH_SIZE = 32  # Number of independent sequences will be processed in parallel
-BLOCK_SIZE = 8  # Max context length for predictions
-N_EMBED = 32
-MAX_ITERS = 10000
-EVAL_INTERVAL = 1000
+BATCH_SIZE = 64  # Number of independent sequences will be processed in parallel
+BLOCK_SIZE = 256  # Max context length for predictions
+N_EMBED = 384
+N_HEADS = 6
+N_LAYERS = 6
+DROPOUT = 0.2
+MAX_ITERS = 5000
+EVAL_INTERVAL = 500
 EVAL_ITERS = 200
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 3e-4
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -44,10 +47,13 @@ if __name__ == "__main__":
     val_data = data[n:]
 
     model = BigramLanguageModel(
+        n_layers=N_LAYERS,
         batch_size=BATCH_SIZE,
         block_size=BLOCK_SIZE,
         n_embed=N_EMBED,
+        n_heads=N_HEADS,
         vocab_size=vocab_size,
+        dropout=DROPOUT,
         device=device,
     ).to(device=device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)

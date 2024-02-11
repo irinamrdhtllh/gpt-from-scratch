@@ -6,13 +6,15 @@ import torch.nn.functional as F
 class Head(nn.Module):
     """One head of self-attention"""
 
-    def __init__(self, head_size, n_embed, block_size):
+    def __init__(self, head_size, n_embed, block_size, dropout):
         super().__init__()
 
         self.key = nn.Linear(n_embed, head_size, bias=False)
         self.query = nn.Linear(n_embed, head_size, bias=False)
         self.value = nn.Linear(n_embed, head_size, bias=False)
         self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size)))
+
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         batch_size, block_size, channel_size = x.shape
@@ -26,6 +28,7 @@ class Head(nn.Module):
             self.tril[:block_size, :block_size] == 0, float("-inf")
         )
         weights = F.softmax(weights, dim=-1)
+        weights = self.dropout(weights)
 
         # Perform the weighted aggregation of the values
         v = self.value(x)
@@ -37,23 +40,84 @@ class Head(nn.Module):
 class MultiHeadAttention(nn.Module):
     """Multiple heads of self-attention in parallel"""
 
-    def __init__(self, num_heads, head_size, n_embed, block_size):
+    def __init__(self, n_heads, head_size, n_embed, block_size, dropout):
         super().__init__()
         self.heads = nn.ModuleList(
             [
-                Head(head_size=head_size, n_embed=n_embed, block_size=block_size)
-                for _ in range(num_heads)
+                Head(
+                    head_size=head_size,
+                    n_embed=n_embed,
+                    block_size=block_size,
+                    dropout=dropout,
+                )
+                for _ in range(n_heads)
             ]
+        )
+        self.projection = nn.Linear(n_embed, n_embed)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        output = torch.cat([head(x) for head in self.heads], dim=-1)
+        output = self.projection(output)
+        output = self.dropout(output)
+
+        return output
+
+
+class FeedForward(nn.Module):
+    """A simple linear layer followed by a non-linearity"""
+
+    def __init__(self, n_embed, dropout):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embed, 4 * n_embed),
+            nn.ReLU(),
+            nn.Linear(4 * n_embed, n_embed),
+            nn.Dropout(dropout),
         )
 
     def forward(self, x):
-        return torch.cat([head(x) for head in self.heads], dim=-1)
+        return self.net(x)
+
+
+class Block(nn.Module):
+    """Transformer block"""
+
+    def __init__(self, n_embed, n_heads, block_size, dropout):
+        super().__init__()
+        head_size = n_embed // n_heads
+        self.self_attention = MultiHeadAttention(
+            n_heads=n_heads,
+            head_size=head_size,
+            n_embed=n_embed,
+            block_size=block_size,
+            dropout=dropout,
+        )
+        self.feed_forward = FeedForward(n_embed=n_embed, dropout=dropout)
+        self.norm_1 = nn.LayerNorm(n_embed)
+        self.norm_2 = nn.LayerNorm(n_embed)
+
+    def forward(self, x):
+        x = x + self.self_attention(self.norm_1(x))
+        x = x + self.feed_forward(self.norm_2(x))
+
+        return x
 
 
 class BigramLanguageModel(nn.Module):
     """The simplest model in NLP"""
 
-    def __init__(self, batch_size, block_size, n_embed, vocab_size, device):
+    def __init__(
+        self,
+        n_layers,
+        batch_size,
+        block_size,
+        n_embed,
+        n_heads,
+        vocab_size,
+        dropout,
+        device,
+    ):
         super().__init__()
         self.block_size = block_size
         self.n_embed = n_embed
@@ -63,12 +127,18 @@ class BigramLanguageModel(nn.Module):
         # Each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
         self.position_embedding_table = nn.Embedding(block_size, n_embed)
-        self.sa_heads = MultiHeadAttention(
-            num_heads=4,
-            head_size=n_embed // 4,
-            n_embed=n_embed,
-            block_size=block_size,
+        self.blocks = nn.Sequential(
+            *[
+                Block(
+                    n_embed=n_embed,
+                    n_heads=n_heads,
+                    block_size=block_size,
+                    dropout=dropout,
+                )
+                for _ in range(n_layers)
+            ]
         )
+        self.final_norm = nn.LayerNorm(n_embed)
         self.lm_head = nn.Linear(n_embed, vocab_size)
 
     def forward(self, x, y=None):
@@ -78,8 +148,8 @@ class BigramLanguageModel(nn.Module):
             torch.arange(block_size, device=self.device)
         )  # (n_block, n_embed)
         inputs = token_embed + pos_embed  # (n_batch, n_block, n_embed)
-        inputs = self.sa_heads.forward(inputs)
-        inputs = self.feed_forward(inputs)
+        inputs = self.blocks(inputs)
+        inputs = self.final_norm(inputs)
         logits = self.lm_head(inputs)  # (n_batch, n_block, n_vocab)
 
         if y is not None:
